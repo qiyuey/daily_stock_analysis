@@ -1561,6 +1561,10 @@ class AgentOrchestrator:
                              "trend_result", "news_context"):
                 if context.get(data_key):
                     ctx.set_data(data_key, context[data_key])
+            if context.get("fundamental_context"):
+                from src.agent.tools.data_tools import _compact_fundamental_context
+
+                ctx.set_data("fundamental_context", _compact_fundamental_context(context["fundamental_context"]))
 
         # Try to extract stock code from the query text
         if scope_resolution is not None:

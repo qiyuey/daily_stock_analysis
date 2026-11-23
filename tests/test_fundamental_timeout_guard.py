@@ -10,6 +10,71 @@ import pytest
 from data_provider.base import DataFetcherManager
 
 
+def test_real_adapter_preserves_completed_financials_when_later_endpoint_hangs(monkeypatch):
+    import sys
+    import pandas as pd
+
+    manager = DataFetcherManager(fetchers=[])
+    release, entered = Event(), Event()
+    workers = []
+    later_calls = []
+    cfg = SimpleNamespace(enable_fundamental_pipeline=True, fundamental_cache_ttl_seconds=0,
+                          fundamental_stage_timeout_seconds=1, fundamental_fetch_timeout_seconds=0.1,
+                          fundamental_retry_max=1)
+
+    def forecast(date):
+        workers.append(current_thread())
+        entered.set()
+        release.wait(2)
+        return pd.DataFrame()
+
+    def forbidden(**kwargs):
+        later_calls.append(kwargs)
+        raise AssertionError("No new endpoint may start after the bundle deadline")
+
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
+        stock_financial_abstract=lambda symbol: pd.DataFrame({
+            "指标": ["营业收入同比增长率", "净利润同比增长率", "净资产收益率(ROE)", "营业总收入(元)"],
+            "20260930": [12.0, 18.0, 15.0, 1000000.0],
+        }), stock_yjyg_em=forecast, stock_yjkb_em=forbidden, stock_institute_hold=forbidden,
+    ))
+    quote = SimpleNamespace(pe_ratio=10, pb_ratio=2, total_mv=100, circ_mv=80)
+    unsupported = {"status": "not_supported", "data": {}, "errors": [], "source_chain": []}
+    with patch("src.config.get_config", return_value=cfg), \
+            patch.object(manager, "get_realtime_quote") as get_quote, \
+            patch.object(manager, "get_capital_flow_context", return_value=unsupported), \
+            patch.object(manager, "get_dragon_tiger_context", return_value=unsupported), \
+            patch.object(manager, "get_board_context", return_value=unsupported):
+        try:
+            context = manager.get_fundamental_context("300308", realtime_quote=quote)
+            assert entered.is_set()
+            assert context["growth"]["data"]["revenue_yoy"] == 12
+            assert context["earnings"]["data"]["financial_report"]["revenue"] == 1000000
+            assert context["coverage"]["growth"] == "ok"
+            assert context["coverage"]["institution"] == "failed"
+            assert any("timeout" in e for e in context["errors"])
+            get_quote.assert_not_called()
+            saved_growth = dict(context["growth"]["data"])
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(2)
+                assert not worker.is_alive()
+    assert context["growth"]["data"] == saved_growth
+    assert not later_calls
+
+
+def test_all_failed_fundamentals_are_failed_instead_of_partial(monkeypatch):
+    manager = DataFetcherManager(fetchers=[])
+    cfg = SimpleNamespace(enable_fundamental_pipeline=True, fundamental_cache_ttl_seconds=0,
+                          fundamental_stage_timeout_seconds=0, fundamental_fetch_timeout_seconds=0,
+                          fundamental_retry_max=1)
+    monkeypatch.setattr("src.config.get_config", lambda: cfg)
+    context = manager.get_fundamental_context("300308")
+    assert context["coverage"]["valuation"] == "failed"
+    assert context["status"] == "failed"
+
+
 def test_repeated_capital_flow_timeouts_do_not_spawn_more_background_workers():
     release = Event()
     workers = []

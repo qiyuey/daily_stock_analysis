@@ -130,16 +130,16 @@ def _handle_search_stock_news(stock_code: str, stock_name: str) -> dict:
 
     if _stock_run_cancelled():
         return {"error": "Stock analysis timed out before searching news"}
+
+    # Mark the attempt before I/O so a raised transport error still counts as
+    # a performed search, without claiming any delivered evidence.
+    record_news_evidence(0)
     response = service.search_stock_news(query_code, query_name, max_results=5)
 
     if _stock_run_cancelled():
-        record_news_evidence(0)
         return {"error": "Stock analysis timed out while searching news"}
 
     if not response.success:
-        # 检索已发起但失败：Agent 这一轮没有拿到新闻证据，必须记 0 而不是不记，
-        # 否则报告会把「搜过但失败」误报成「未配置搜索渠道」。
-        record_news_evidence(0)
         return {
             "query": response.query,
             "success": False,
@@ -210,6 +210,8 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
 
     if _stock_run_cancelled():
         return {"error": "Stock analysis timed out before searching intelligence"}
+
+    record_news_evidence(0)
     intel_results = service.search_comprehensive_intel(
         stock_code=query_code,
         stock_name=query_name,
@@ -217,12 +219,9 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
     )
 
     if _stock_run_cancelled():
-        record_news_evidence(0)
         return {"error": "Stock analysis timed out while searching intelligence"}
 
     if not intel_results:
-        # 多维检索已发起但整体没有结果，同样必须记 0（见 _handle_search_stock_news）。
-        record_news_evidence(0)
         return {"error": "Comprehensive intel search returned no results"}
 
     # Format into readable report

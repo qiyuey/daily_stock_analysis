@@ -2,6 +2,7 @@
 """Regression tests for Issue #1386 P1a market phase context plumbing."""
 
 import os
+import json
 import sys
 import unittest
 from datetime import date, datetime
@@ -109,6 +110,66 @@ def _make_pipeline(*, agent_mode: bool = False, save_context_snapshot: bool = Tr
 
 
 class PipelineMarketPhaseContextTestCase(unittest.TestCase):
+    def test_agent_final_news_overview_tracks_consumed_tool_results(self):
+        from src.agent.executor import AgentExecutor
+        from src.agent.llm_adapter import LLMResponse, ToolCall
+        from src.agent.tools.registry import ToolRegistry
+        from src.agent.tools.search_tools import search_stock_news_tool
+
+        for hits in (None, 0, 2):
+            with self.subTest(hits=hits):
+                pipeline = _make_pipeline(agent_mode=True)
+                pipeline._ensure_agent_history = MagicMock()
+                pipeline.search_service.is_available = True
+                dashboard = {
+                    "stock_name": "贵州茅台", "sentiment_score": 50,
+                    "trend_prediction": "震荡", "operation_advice": "持有", "decision_type": "hold",
+                }
+                adapter = MagicMock()
+                responses = []
+                if hits is not None:
+                    responses.append(LLMResponse(content="", tool_calls=[ToolCall(
+                        id="news", name="search_stock_news",
+                        arguments={"stock_code": "600519", "stock_name": "贵州茅台"},
+                    )], usage={}, provider="test"))
+                responses.append(LLMResponse(
+                    content=json.dumps(dashboard), tool_calls=[], usage={}, provider="test",
+                ))
+                adapter.call_with_tools.side_effect = responses
+                registry = ToolRegistry()
+                registry.register(search_stock_news_tool)
+                executor = AgentExecutor(registry, adapter, max_steps=3)
+                search = MagicMock()
+                search.is_available = True
+                search.search_stock_news.return_value = SimpleNamespace(
+                    success=True, query="test", provider="test",
+                    results=[SimpleNamespace(title="news", snippet="evidence", url="https://example.test",
+                                             source="test", published_date="2026-11-11")
+                             for _ in range(hits or 0)],
+                )
+                with (
+                    patch("src.agent.factory.build_agent_executor", return_value=executor),
+                    patch("src.agent.tools.search_tools._get_search_service", return_value=search),
+                    patch("src.agent.tools.search_tools._persist_news_response"),
+                ):
+                    result = pipeline._analyze_with_agent(
+                        code="600519", report_type=ReportType.SIMPLE, query_id="news-regression",
+                        stock_name="贵州茅台", realtime_quote=None, chip_data=None,
+                        fundamental_context={"market": "cn"}, trend_result=None,
+                    )
+                self.assertIsNotNone(result)
+                self.assertTrue(result.success)
+                self.assertEqual(result.search_performed, hits is not None)
+                self.assertEqual(result.news_result_count, hits or 0)
+                self.assertEqual(result.news_evidence_present, bool(hits))
+                overview = result.analysis_context_pack_overview
+                news = next(b for b in overview["blocks"] if b["key"] == "news")
+                self.assertEqual(news["status"], "available" if hits else "missing")
+                self.assertEqual(overview["metadata"]["news_result_count"], hits or 0)
+                saved = pipeline.db.save_analysis_history.call_args.kwargs["context_snapshot"]
+                self.assertEqual(saved["analysis_context_pack_overview"], overview)
+                self.assertNotIn("evidence", json.dumps(overview))
+
     def test_jp_kr_analysis_context_uses_daily_fetcher_when_db_context_missing(self):
         pipeline = _make_pipeline()
         pipeline.db.get_analysis_context.side_effect = [None, None]

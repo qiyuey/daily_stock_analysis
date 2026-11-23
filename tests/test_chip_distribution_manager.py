@@ -8,6 +8,33 @@ from data_provider.base import DataFetcherManager
 from data_provider.realtime_types import ChipDistribution, get_chip_circuit_breaker
 
 
+def test_etf_chip_capability_is_consistent_in_manager_tool_and_both_pipeline_paths():
+    from src.agent.tools.data_tools import _handle_get_chip_distribution
+    from src.core.pipeline import StockAnalysisPipeline
+    from src.services.analysis_context_builder import AnalysisContextBuilder
+
+    provider = _ChipFetcher("chip-source", 1, None)
+    manager = DataFetcherManager(fetchers=[provider])
+    pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+    pipeline.query_source = "test"
+    for code in ("513050", "515450"):
+        with patch("src.config.get_config", return_value=SimpleNamespace(enable_chip_distribution=True)):
+            assert manager.get_chip_distribution(code) is None
+        with patch("src.agent.tools.data_tools._get_fetcher_manager") as get_manager:
+            assert _handle_get_chip_distribution(code)["status"] == "not_supported"
+            get_manager.assert_not_called()
+        common = dict(code=code, stock_name="ETF", market="cn", phase=None,
+                      fundamental_context=None, query_id="etf-chip")
+        agent = pipeline._build_agent_analysis_artifacts(initial_context={}, **common)
+        legacy = pipeline._build_legacy_analysis_artifacts(
+            context={}, enhanced_context={}, realtime_quote=None, trend_result=None,
+            chip_data=None, news_context=None, news_result_count=None, **common,
+        )
+        for artifacts in (agent, legacy):
+            assert AnalysisContextBuilder.build(artifacts).blocks["chip"].status.value == "not_supported"
+    assert provider.calls == 0
+
+
 class _ChipFetcher:
     def __init__(self, name: str, priority: int, result):
         self.name = name

@@ -15,6 +15,7 @@ import logging
 import inspect
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 import uuid
 from collections import defaultdict, deque
@@ -28,7 +29,7 @@ import pandas as pd
 from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Config
 from src.storage import get_db
 from data_provider import DataFetcherManager
-from data_provider.base import is_bse_code, normalize_stock_code
+from data_provider.base import is_bse_code, normalize_stock_code, _is_etf_code
 from data_provider.realtime_types import ChipDistribution
 from src.analyzer import (
     GeminiAnalyzer,
@@ -1826,21 +1827,22 @@ class StockAnalysisPipeline:
                 code, stock_name, analysis_target=analysis_target
             )
             market = "cn" if is_index else get_market_for_stock(normalize_stock_code(code))
+            agent_artifacts = self._build_agent_analysis_artifacts(
+                code=code,
+                stock_name=stock_name,
+                market=market,
+                phase=market_phase_context,
+                initial_context=initial_context,
+                fundamental_context=fundamental_context,
+                query_id=query_id,
+                base_context=analysis_context,
+                portfolio_context=portfolio_context,
+            )
             (
                 analysis_context_pack_summary,
                 analysis_context_pack_overview,
             ) = self._build_analysis_context_pack_outputs(
-                self._build_agent_analysis_artifacts(
-                    code=code,
-                    stock_name=stock_name,
-                    market=market,
-                    phase=market_phase_context,
-                    initial_context=initial_context,
-                    fundamental_context=fundamental_context,
-                    query_id=query_id,
-                    base_context=analysis_context,
-                    portfolio_context=portfolio_context,
-                ),
+                agent_artifacts,
                 report_language=report_language,
                 code=code,
                 query_id=query_id,
@@ -1895,6 +1897,7 @@ class StockAnalysisPipeline:
             # 三态计数取自 Agent 实际消费的搜索工具结果：渠道不可用为 None（未执行
             # 检索），渠道可用则从 0 起步、拿到多少算多少。
             if result is not None and news_evidence is not None:
+                result.search_performed = news_evidence.search_performed
                 result.news_result_count = news_evidence.resolve(
                     search_available=bool(
                         self.search_service is not None
@@ -1909,6 +1912,25 @@ class StockAnalysisPipeline:
                     social_evidence_context,
                     persisted_intelligence_context,
                 )
+                # Rebuild the final overview from evidence delivered during this
+                # run. Keep the initial prompt summary unchanged and exclude the
+                # post-analysis persistence-only news lookup below.
+                _, final_overview = self._build_analysis_context_pack_outputs(
+                    replace(
+                        agent_artifacts,
+                        news_result_count=result.news_result_count,
+                        metadata={
+                            **agent_artifacts.metadata,
+                            "context_stage": "final",
+                            "news_search_performed": result.search_performed,
+                        },
+                    ),
+                    report_language=report_language,
+                    code=code,
+                    query_id=query_id,
+                )
+                if final_overview is not None:
+                    analysis_context_pack_overview = final_overview
             record_llm_run(
                 success=bool(result and getattr(result, "success", True)),
                 model=getattr(result, "model_used", None) if result else getattr(agent_result, "model", None),
@@ -3490,6 +3512,7 @@ class StockAnalysisPipeline:
             metadata={
                 "query_id": query_id,
                 "trigger_source": self.query_source,
+                **({"chip_not_supported": True} if _is_etf_code(code) else {}),
             },
             portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
         )
@@ -3540,6 +3563,7 @@ class StockAnalysisPipeline:
             metadata={
                 "query_id": query_id,
                 "trigger_source": self.query_source,
+                **({"chip_not_supported": True} if _is_etf_code(code) else {}),
             },
             portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
         )

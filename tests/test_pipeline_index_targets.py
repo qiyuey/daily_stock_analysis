@@ -434,7 +434,6 @@ class PipelineSniperSanityTestCase(unittest.TestCase):
                     StockAnalysisPipeline._refresh_decision_action_for_final_result
                 )
                 pipeline._ensure_agent_history = MagicMock()
-                pipeline._build_agent_analysis_artifacts = MagicMock()
                 pipeline._persist_skill_opinion_samples_after_history_save = MagicMock()
                 pipeline._filter_agent_tools_for_index = MagicMock(return_value=build_executor.return_value)
                 pipeline.db.get_data_range.return_value = [MagicMock(to_dict=lambda: {"close": 100})]
@@ -509,7 +508,6 @@ class PipelineDailySourceAttributionTestCase(unittest.TestCase):
         pipeline._load_agent_analysis_context = MagicMock(
             return_value={"today": {"data_source": "AkshareFetcher"}}
         )
-        pipeline._build_agent_analysis_artifacts = MagicMock(return_value={})
         pipeline._agent_result_to_analysis_result = MagicMock(
             return_value=_analysis_result(
                 "csi930955", "红利低波100", "agent:openai"

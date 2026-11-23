@@ -1825,10 +1825,17 @@ class TestAgentExecutor(unittest.TestCase):
     def test_parallel_tool_timeout_marks_only_pending_calls(self):
         """Parallel tool batches should emit timeout errors for unfinished tools."""
         registry = ToolRegistry()
+        from threading import Event
+
+        release_slow = Event()
+        slow_finished = Event()
 
         def _maybe_slow_echo(message):
             if message == "slow":
-                time.sleep(0.05)
+                try:
+                    release_slow.wait()
+                finally:
+                    slow_finished.set()
             return {"echo": message}
 
         registry.register(
@@ -1860,16 +1867,20 @@ class TestAgentExecutor(unittest.TestCase):
             ),
         ]
 
-        result = run_agent_loop(
-            messages=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "Analyze"},
-            ],
-            tool_registry=registry,
-            llm_adapter=adapter,
-            max_steps=3,
-            tool_call_timeout_seconds=0.01,
-        )
+        try:
+            result = run_agent_loop(
+                messages=[
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "Analyze"},
+                ],
+                tool_registry=registry,
+                llm_adapter=adapter,
+                max_steps=3,
+                tool_call_timeout_seconds=0.01,
+            )
+        finally:
+            release_slow.set()
+            self.assertTrue(slow_finished.wait(2))
 
         self.assertTrue(result.success)
         self.assertEqual(len(result.tool_calls_log), 2)
@@ -2070,6 +2081,43 @@ class TestBuildUserMessage(unittest.TestCase):
         msg = self.executor._build_user_message("Analyze 600519")
         self.assertIn("Analyze 600519", msg)
         self.assertIn("决策仪表盘", msg)
+
+    def test_prefetched_fundamentals_and_trend_reach_actual_model_input(self):
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.return_value = LLMResponse(
+            content='{"stock_name":"贵州茅台","sentiment_score":50}',
+            tool_calls=[], usage={}, provider="test",
+        )
+        executor = AgentExecutor(ToolRegistry(), adapter, max_steps=1)
+        result = executor.run("分析 600519", context={
+            "stock_code": "600519",
+            "fundamental_context": {
+                "market": "cn", "status": "partial", "coverage": {"boards": "failed"},
+                "as_of": "2026-11-11",
+                "growth": {"status": "ok", "data": {"revenue_yoy": 12.5}},
+                "boards": {"status": "failed", "data": {}, "errors": ["boards timeout"]},
+                "unrelated_raw": "should-not-be-injected",
+            },
+            "trend_result": {"ma5": 123.45, "trend_status": "bull"},
+        })
+        self.assertTrue(result.success)
+        messages = adapter.call_with_tools.call_args.args[0]
+        user_input = next(m["content"] for m in messages if m["role"] == "user")
+        for expected in ("系统已获取的基本面", "revenue_yoy", "12.5", "boards timeout",
+                         "2026-11-11", "系统已获取的趋势分析", "123.45"):
+            self.assertIn(expected, user_input)
+        self.assertNotIn("should-not-be-injected", user_input)
+
+    def test_multi_agent_context_also_receives_compact_fundamentals(self):
+        from src.agent.orchestrator import AgentOrchestrator
+
+        orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+        ctx = orchestrator._build_context("分析 600519", context={
+            "stock_code": "600519",
+            "fundamental_context": {"market": "cn", "status": "partial",
+                                    "growth": {"status": "ok", "data": {"roe": 15.0}}},
+        })
+        self.assertEqual(ctx.get_data("fundamental_context")["growth"]["data"]["roe"], 15.0)
 
     def test_message_with_context(self):
         msg = self.executor._build_user_message(

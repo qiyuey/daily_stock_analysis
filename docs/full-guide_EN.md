@@ -399,6 +399,8 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 | `FUNDAMENTAL_CACHE_TTL_SECONDS` | Fundamental aggregation cache TTL (seconds), short cache to reduce repeated API pulling. | `120` | Optional |
 | `FUNDAMENTAL_CACHE_MAX_ENTRIES` | Maximum entries for fundamental cache (evicted by time within TTL) | `256` | Optional |
 
+> Fundamentals reuse the quote already fetched in the same run. Completed financial blocks survive a bundle timeout, and subsequent endpoint calls check the remaining budget. ETFs skip company financial/shareholder endpoints and report chip distribution as unsupported. If Tushare calendar access fails, the existing local exchange-session calendar is used when available; otherwise normal provider fallback continues.
+
 > **Behavior Notes:**
 > - Prefer [TickPlus](http://www.tickplus.org/register?reg=5433cf922395) for A-shares / ETFs. Configure `TICKPLUS_API_KEY`; explicit realtime priority is respected. Indicators use `fullfactor` with basic-quote fallback. Batch prefetch groups stocks and ETFs (100 symbols per request, 30-second cache). ETF rotation uses an isolated forward-adjusted instance. Ordinary analysis remains unadjusted; existing index, market-review, fundamental and overseas routes remain available. See [details](tickplus.md).
 > - **A-shares**: Returns aggregated capabilities by `valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards`.
@@ -1091,6 +1093,8 @@ For a full illustrated troubleshooting guide, see [docs/bot/feishu-bot-config.md
 3. Get Chat ID (via @userinfobot)
 4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 5. (Optional) To send to Topic, set `TELEGRAM_MESSAGE_THREAD_ID` (get from Topic link)
+
+Telegram text reports preserve bold, italics, inline code, and links. Long reports are sent in multiple messages, and punctuation in stock names and body text is displayed literally.
 
 ### Email
 

@@ -904,8 +904,22 @@ class AgentExecutor:
                 parts.append(f"\n[系统已获取的实时行情]\n{json.dumps(context['realtime_quote'], ensure_ascii=False)}")
             if context.get("chip_distribution"):
                 parts.append(f"\n[系统已获取的筹码分布]\n{json.dumps(context['chip_distribution'], ensure_ascii=False)}")
+            if context.get("fundamental_context"):
+                from src.agent.tools.data_tools import _compact_fundamental_context
+
+                fundamentals = _compact_fundamental_context(context["fundamental_context"])
+                parts.append(f"\n[系统已获取的基本面]\n{json.dumps(fundamentals, ensure_ascii=False, default=str)}")
+            if context.get("trend_result"):
+                parts.append(f"\n[系统已获取的趋势分析]\n{json.dumps(context['trend_result'], ensure_ascii=False, default=str)}")
             if context.get("news_context"):
                 parts.append(f"\n[系统已获取的新闻与舆情情报]\n{context['news_context']}")
+
+            logger.info(
+                "Agent pre-fetched input: fields=%s chars=%d",
+                [key for key in ("realtime_quote", "chip_distribution", "fundamental_context",
+                                 "trend_result", "news_context") if context.get(key)],
+                sum(len(part) for part in parts),
+            )
 
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)

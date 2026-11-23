@@ -18,6 +18,7 @@ from typing import Callable
 import pandas as pd
 import requests
 
+from data_provider.baostock_fetcher import BAOSTOCK_SESSION_LOCK
 from data_provider.tushare_fetcher import (
     TUSHARE_PERMISSION_COOLDOWN_SECONDS,
     _build_tushare_token_scope,
@@ -60,7 +61,6 @@ _SOURCE_HEALTH_FAILURE_THRESHOLD = 3
 _SOURCE_HEALTH_COOLDOWN_SECONDS = 5 * 60
 _DAILY_CALL_TIMEOUT_SECONDS = 20.0
 _DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com"
-_BAOSTOCK_LOCK = threading.Lock()
 _BAOSTOCK_OUTAGE_ERROR: str | None = None
 _SOURCE_HEALTH: dict[str, dict[str, object]] = {}
 _SOURCE_HEALTH_LOCK = threading.Lock()
@@ -959,7 +959,7 @@ def _fetch_daily_baostock(code: str, *, lookback_days: int) -> pd.DataFrame:
     start_date = (datetime.now() - timedelta(days=max(lookback_days * 2, 90))).strftime("%Y-%m-%d")
     end_date = datetime.now().strftime("%Y-%m-%d")
 
-    with _BAOSTOCK_LOCK:
+    with BAOSTOCK_SESSION_LOCK:
         if _BAOSTOCK_OUTAGE_ERROR is not None:
             raise RuntimeError(_BAOSTOCK_OUTAGE_ERROR)
 

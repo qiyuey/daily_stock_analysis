@@ -164,6 +164,7 @@ def _compact_fundamental_context(fundamental_context: dict) -> dict:
         "market": fundamental_context.get("market"),
         "status": fundamental_context.get("status"),
         "coverage": fundamental_context.get("coverage", {}),
+        "as_of": fundamental_context.get("as_of"),
     }
     for block in blocks:
         payload = fundamental_context.get(block, {})
@@ -171,6 +172,8 @@ def _compact_fundamental_context(fundamental_context: dict) -> dict:
             compact[block] = {
                 "status": payload.get("status"),
                 "data": payload.get("data", {}),
+                "source_chain": payload.get("source_chain", []),
+                "errors": payload.get("errors", []),
             }
         else:
             compact[block] = {"status": "failed", "data": {}}
@@ -414,6 +417,10 @@ get_daily_history_tool = ToolDefinition(
 
 def _handle_get_chip_distribution(stock_code: str) -> dict:
     """Get chip distribution data."""
+    from data_provider.base import _is_etf_code
+
+    if _is_etf_code(stock_code):
+        return {"code": stock_code, "status": "not_supported", "reason": "ETF chip distribution is not supported"}
     manager = _get_fetcher_manager()
     chip = manager.get_chip_distribution(stock_code)
 

@@ -2074,13 +2074,21 @@ class TestTelegramSender(unittest.TestCase):
     def test_many_source_links_reach_the_correct_destinations(self, mock_post):
         mock_post.return_value = _response(200, {"ok": True})
         sender = TelegramSender(_config(telegram_bot_token="BOT", telegram_chat_id="CHAT"))
-        links = "\n".join(f"[Source {i}](https://example.org/{i})" for i in range(1, 13))
-        for prefix, expected_payloads in (("", [links]), ("x" * 4096 + "\n---\n", ["x" * 4096, links])):
-            with self.subTest(messages=len(expected_payloads)):
+        sources = [(f"Source {i}", f"https://example.org/{i}") for i in range(1, 13)]
+        links = "\n".join(f"[{label}]({url})" for label, url in sources)
+        for prefix in ("", "x" * 4096 + "\n---\n"):
+            with self.subTest(chunked=bool(prefix)):
                 mock_post.reset_mock()
                 self.assertTrue(sender.send_to_telegram(prefix + links))
-                payloads = [call.kwargs["json"]["text"] for call in mock_post.call_args_list]
-                self.assertEqual(payloads, expected_payloads)
+                self.assertEqual(mock_post.call_count, 2 if prefix else 1)
+                payload = mock_post.call_args.kwargs["json"]
+                connected_sources = []
+                for entity in payload["entities"]:
+                    self.assertEqual(entity["type"], "text_link")
+                    start = entity["offset"]
+                    label = payload["text"][start:start + entity["length"]]
+                    connected_sources.append((label, entity["url"]))
+                self.assertEqual(connected_sources, sources)
 
     @mock.patch("src.notification_sender.telegram_sender.time.sleep")
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
@@ -2169,48 +2177,38 @@ class TestTelegramSender(unittest.TestCase):
         self.assertIn("sendMessage", mock_post.call_args[0][0])
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
-    def test_send_retries_plain_text_when_markdown_http_400(self, mock_post):
-        markdown_error = _response(400)
-        markdown_error.text = (
-            '{"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities"}'
-        )
-        plain_text_success = _response(200, {"ok": True})
-        mock_post.side_effect = [markdown_error, plain_text_success]
+    def test_send_literal_markdown_characters_with_explicit_entities(self, mock_post):
+        mock_post.return_value = _response(200, {"ok": True})
+        sender = TelegramSender(_config(telegram_bot_token="BOT", telegram_chat_id="CHAT"))
+        content = "📈 *ST宝实 _未闭合 **AAPL** (观察) `PE_1`"
+        self.assertTrue(sender.send_to_telegram(content))
 
-        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
-        sender = TelegramSender(cfg)
-        result = sender.send_to_telegram("*ST宝实")
-
-        self.assertTrue(result)
-        self.assertEqual(mock_post.call_count, 2)
-        first_payload = mock_post.call_args_list[0][1]["json"]
-        second_payload = mock_post.call_args_list[1][1]["json"]
-        self.assertEqual(first_payload["parse_mode"], "Markdown")
-        self.assertNotIn("parse_mode", second_payload)
-        self.assertEqual(second_payload["text"], "*ST宝实")
+        mock_post.assert_called_once()
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["text"], "📈 *ST宝实 _未闭合 AAPL (观察) PE_1")
+        self.assertNotIn("parse_mode", payload)
+        self.assertEqual(payload["entities"], [
+            {"type": "bold", "offset": utf16_len("📈 *ST宝实 _未闭合 "), "length": 4},
+            {"type": "code", "offset": utf16_len("📈 *ST宝实 _未闭合 AAPL (观察) "), "length": 4},
+        ])
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
-    def test_send_plain_text_fallback_keeps_original_text_after_legacy_markdown_error(self, mock_post):
-        markdown_error = _response(400)
-        markdown_error.text = (
-            '{"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities"}'
-        )
-        plain_text_success = _response(200, {"ok": True})
-        mock_post.side_effect = [markdown_error, plain_text_success]
+    def test_send_falls_back_without_entities_if_telegram_rejects_formatting(self, mock_post):
+        formatting_error = _response(400)
+        formatting_error.text = '{"ok":false,"description":"Bad Request: can\'t parse entities"}'
+        mock_post.side_effect = [formatting_error, _response(200, {"ok": True})]
+        sender = TelegramSender(_config(telegram_bot_token="BOT", telegram_chat_id="CHAT"))
 
-        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
-        sender = TelegramSender(cfg)
-        content = "关注 **AAPL** (未闭合)"
-        result = sender.send_to_telegram(content)
+        self.assertTrue(sender.send_to_telegram("关注 **AAPL** (观察)"))
 
-        self.assertTrue(result)
-        first_payload = mock_post.call_args_list[0][1]["json"]
-        second_payload = mock_post.call_args_list[1][1]["json"]
-        self.assertEqual(first_payload["text"], "关注 *AAPL* \\(未闭合\\)")
-        self.assertEqual(second_payload["text"], content)
+        first, second = [call.kwargs["json"] for call in mock_post.call_args_list]
+        self.assertIn("entities", first)
+        self.assertNotIn("entities", second)
+        self.assertEqual(first["text"], "关注 AAPL (观察)")
+        self.assertEqual(second["text"], first["text"])
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
-    def test_send_uses_legacy_telegram_report_formatter(self, mock_post):
+    def test_send_preserves_report_layout_and_clickable_links(self, mock_post):
         mock_post.return_value = _response(200, {"ok": True})
         cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
         sender = TelegramSender(cfg)
@@ -2220,7 +2218,7 @@ class TestTelegramSender(unittest.TestCase):
             "| 股票 | 信号 |\n"
             "| --- | --- |\n"
             "| 600519 | 强势 |\n\n"
-            "[详情](https://example.com/report)"
+            "[详情](https://example.com/report_(v2))"
         )
 
         result = sender.send_to_telegram(content)
@@ -2231,7 +2229,13 @@ class TestTelegramSender(unittest.TestCase):
         self.assertIn("日报", rendered)
         self.assertIn("📊 分析结果摘要", rendered)
         self.assertIn("| 股票 | 信号 |", rendered)
-        self.assertIn("[详情](https://example.com/report)", rendered)
+        self.assertTrue(rendered.endswith("详情"))
+        self.assertEqual(payload["entities"], [{
+            "type": "text_link",
+            "url": "https://example.com/report_(v2)",
+            "offset": utf16_len(rendered[:-2]),
+            "length": 2,
+        }])
         self.assertNotIn("# 日报", rendered)
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
@@ -2248,56 +2252,21 @@ class TestTelegramSender(unittest.TestCase):
         self.assertIn("🎯 Market Review", payload["text"])
         self.assertIn("Body", payload["text"])
 
-    @mock.patch.object(TelegramSender, "_send_telegram_message", return_value=True)
-    def test_send_telegram_chunked_splits_large_reason_without_delimiter(self, mock_send_telegram_message):
-        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
-        sender = TelegramSender(cfg)
-        long_reason = "原因过长需分段测试：" + ("A" * 5000)
-        content = f"**AI 决策信号**\n- 理由: {long_reason}\n"
-
-        result = sender._send_telegram_chunked(
-            "http://api.telegram.org",
-            "CHAT",
-            sender._convert_to_telegram_markdown(content),
-            max_length=4096,
-            timeout_seconds=3,
-        )
-
-        self.assertTrue(result)
-        self.assertGreaterEqual(len(mock_send_telegram_message.call_args_list), 2)
-        for call in mock_send_telegram_message.call_args_list:
-            sent_text = call.args[2]
-            self.assertLessEqual(len(sent_text), 4096)
-
-    @mock.patch.object(TelegramSender, "_send_telegram_message", return_value=True)
-    def test_send_to_telegram_chunked_path_with_long_reason_without_delimiter(self, mock_send_telegram_message):
-        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
-        sender = TelegramSender(cfg)
-        long_reason = "原因过长需分段测试：" + ("B" * 5000)
-        content = f"**AI 决策信号**\n- 理由: {long_reason}\n"
-
-        result = sender.send_to_telegram(content)
-
-        self.assertTrue(result)
-        self.assertGreaterEqual(len(mock_send_telegram_message.call_args_list), 2)
-        for call in mock_send_telegram_message.call_args_list:
-            sent_text = call.args[2]
-            self.assertLessEqual(len(sent_text), 4096)
-
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
-    def test_send_chunks_by_final_markdown_payload_length(self, mock_post):
+    def test_send_chunks_rebases_entities_when_formatting_crosses_limit(self, mock_post):
         mock_post.return_value = _response(200, {"ok": True})
-        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
-        sender = TelegramSender(cfg)
-        content = "(" * 4090
+        sender = TelegramSender(_config(telegram_bot_token="BOT", telegram_chat_id="CHAT"))
+        prefix = "(" * 4093
+        formatted = "📈AB"
+        self.assertTrue(sender.send_to_telegram(f"{prefix}**{formatted}** (尾)"))
 
-        result = sender.send_to_telegram(content)
-
-        self.assertTrue(result)
-        self.assertGreaterEqual(mock_post.call_count, 2)
-        payload_texts = [call.kwargs["json"]["text"] for call in mock_post.call_args_list]
-        self.assertTrue(all(len(text) <= 4096 for text in payload_texts))
-        self.assertEqual("".join(payload_texts), sender._convert_to_telegram_markdown(content))
+        first, second = [call.kwargs["json"] for call in mock_post.call_args_list]
+        self.assertEqual(first["text"] + second["text"], prefix + formatted + " (尾)")
+        self.assertEqual(utf16_len(first["text"]), 4096)
+        self.assertEqual(first["entities"], [{"type": "bold", "offset": 4093, "length": 3}])
+        self.assertEqual(second["entities"], [{"type": "bold", "offset": 0, "length": 1}])
+        self.assertNotIn("parse_mode", first)
+        self.assertNotIn("parse_mode", second)
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
     def test_send_chunks_by_utf16_length_for_emoji_content(self, mock_post):
@@ -2313,7 +2282,7 @@ class TestTelegramSender(unittest.TestCase):
         payload_texts = [call.kwargs["json"]["text"] for call in mock_post.call_args_list]
         self.assertGreaterEqual(len(payload_texts), 2)
         self.assertTrue(all(utf16_len(text) <= 4096 for text in payload_texts))
-        self.assertEqual("".join(payload_texts), sender._convert_to_telegram_markdown(content))
+        self.assertEqual("".join(payload_texts), content)
 
     @mock.patch("src.notification_sender.telegram_sender.requests.post")
     def test_send_plain_text_fallback_handles_non_json_200(self, mock_post):
@@ -2328,7 +2297,7 @@ class TestTelegramSender(unittest.TestCase):
 
         cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
         sender = TelegramSender(cfg)
-        result = sender.send_to_telegram("*ST宝实")
+        result = sender.send_to_telegram("**宝实**")
 
         self.assertFalse(result)
         self.assertEqual(mock_post.call_count, 2)

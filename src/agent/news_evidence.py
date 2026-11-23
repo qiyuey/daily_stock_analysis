@@ -7,8 +7,8 @@ empty-news disclosure 必须反映「本次分析真正用到的新闻证据」�
 两个方向都会失真——Agent 明明用了新闻却因补查失败而被标成「未纳入新闻面证据」，
 或 Agent 没拿到新闻却因补查有结果而被错误地不提示。
 
-用法：pipeline 在 `executor.run()` 前后开启并读取作用域；搜索工具在返回结果时
-记录本次真正交给 Agent 的条数。工具在 ThreadPoolExecutor 中执行，
+用法：pipeline 在 `executor.run()` 前后开启并读取作用域；搜索工具发起请求前
+记 0，返回结果时累计真正交给 Agent 的条数。工具在 ThreadPoolExecutor 中执行，
 `src/agent/runner.py` 通过 `contextvars.copy_context()` 提交任务，因此 ContextVar
 中的**可变**累加器在工作线程与父线程之间是同一个对象，工具线程里的累加对
 pipeline 可见。请勿把它换成保存不可变值的 ContextVar，那样父线程读不到。
@@ -30,9 +30,10 @@ class NewsEvidenceAccumulator:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._total = 0
+        self._calls = 0
 
     def record(self, count: int) -> None:
-        """记录一次搜索工具真实返回的条数；零命中也必须记录（记 0）。"""
+        """记录检索尝试（0）或实际交给 Agent 的证据条数。"""
         try:
             value = int(count)
         except (TypeError, ValueError):
@@ -41,6 +42,13 @@ class NewsEvidenceAccumulator:
             value = 0
         with self._lock:
             self._total += value
+            self._calls += 1
+
+    @property
+    def search_performed(self) -> bool:
+        """Whether a search tool attempted a request, even if it returned no evidence."""
+        with self._lock:
+            return self._calls > 0
 
     @property
     def total(self) -> int:

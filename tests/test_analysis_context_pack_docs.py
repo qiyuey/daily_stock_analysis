@@ -95,9 +95,9 @@ def test_analysis_context_pack_doc_records_agent_context_visibility() -> None:
     for token in (
         "`initial_context`",
         "`fundamental_context`",
-        "不显式注入 `fundamental_context` 或 `trend_result`",
+        "同时注入 `trend_result`",
         "pre-fetched data",
-        "不预注入 `fundamental_context`",
+        "预注入压缩基本面 `fundamental_context`",
     ):
         assert token in section
 
@@ -274,7 +274,7 @@ def test_analysis_context_pack_doc_defines_p3_runtime_consumption_boundaries() -
         "禁止写入 `ctx.data`",
         "`BaseAgent._build_messages()`",
         "`_inject_cached_data()`",
-        "`news` block 为 `missing` 是当前 P3 的预期状态",
+        "首轮 `news` block 可以为 `missing`",
         "`analysis_history.context_snapshot`",
         "`analysis_context_pack`",
         "`analysis_context_pack_summary`",

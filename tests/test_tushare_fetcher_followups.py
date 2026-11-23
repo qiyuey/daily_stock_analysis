@@ -35,6 +35,50 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         fetcher.priority = 2
         return fetcher
 
+    def test_calendar_rate_limit_uses_exact_local_sessions_and_caches(self):
+        fetcher = self._make_fetcher()
+        fetcher._api.trade_cal.side_effect = RuntimeError("trade_cal frequency limit")
+        sessions = pd.DatetimeIndex(["2026-10-30", "2026-11-02"])
+        with patch.object(fetcher, "_get_china_now", return_value=datetime(2026, 11, 2)), \
+                patch("src.core.trading_calendar.get_trading_dates", return_value=sessions) as local:
+            self.assertEqual(fetcher._get_trade_dates(), ["20261102", "20261030"])
+            self.assertEqual(fetcher._get_trade_dates(), ["20261102", "20261030"])
+        fetcher._api.trade_cal.assert_called_once()
+        local.assert_called_once()
+
+    def test_unavailable_calendars_preserve_failure_without_weekday_guess(self):
+        fetcher = self._make_fetcher()
+        fetcher._api.trade_cal.side_effect = RuntimeError("calendar unavailable")
+        with patch("src.core.trading_calendar.get_trading_dates", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "calendar unavailable"):
+                fetcher._get_trade_dates()
+        self.assertIsNone(fetcher.date_list)
+
+    def test_concurrent_calendar_callers_share_refresh(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        fetcher = self._make_fetcher()
+        entered, release = Event(), Event()
+
+        def calendar(**kwargs):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return pd.DataFrame({"cal_date": ["20261102"], "is_open": [1]})
+
+        fetcher._api.trade_cal.side_effect = calendar
+        with patch.object(fetcher, "_get_china_now", return_value=datetime(2026, 11, 2)), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(fetcher._get_trade_dates)
+            try:
+                self.assertTrue(entered.wait(2))
+                second = pool.submit(fetcher._get_trade_dates)
+            finally:
+                release.set()
+            self.assertEqual(first.result(), ["20261102"])
+            self.assertEqual(second.result(), ["20261102"])
+        fetcher._api.trade_cal.assert_called_once()
+
     def test_get_trade_time_refreshes_trade_calendar_when_day_changes(self) -> None:
         fetcher = self._make_fetcher()
         fetcher._api.trade_cal.side_effect = [

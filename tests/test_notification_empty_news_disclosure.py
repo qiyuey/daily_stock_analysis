@@ -546,6 +546,19 @@ class AgentNewsEvidenceTestCase(unittest.TestCase):
         db_patcher.start()
         self.addCleanup(db_patcher.stop)
 
+    def test_raised_search_error_records_attempt_without_news_evidence(self):
+        from unittest.mock import MagicMock
+        from src.agent.tools.search_tools import _handle_search_stock_news
+
+        service = MagicMock()
+        service.is_available = True
+        service.search_stock_news.side_effect = RuntimeError("transport failure")
+        self._install_service(service)
+        with self.assertRaisesRegex(RuntimeError, "transport failure"):
+            _handle_search_stock_news("600519", "测试标的")
+        self.assertTrue(self.accumulator.search_performed)
+        self.assertEqual(self.accumulator.total, 0)
+
     def test_agent_evidence_survives_a_failing_post_hoc_query(self):
         """Agent 用了 6 条新闻，事后补查零命中 —— 不得谎称未纳入新闻证据。"""
         from src.agent.tools.search_tools import _handle_search_comprehensive_intel

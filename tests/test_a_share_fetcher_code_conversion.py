@@ -4,13 +4,16 @@ Regression tests for provider-side A-share stock code conversion.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
 from data_provider.base import DataFetcherManager, normalize_stock_code
-from data_provider.baostock_fetcher import BaostockFetcher
+from data_provider.baostock_fetcher import BAOSTOCK_SESSION_LOCK, BaostockFetcher
 from data_provider.pytdx_fetcher import PytdxFetcher
 from data_provider.tushare_fetcher import TushareFetcher
+from src.services.screening import daily
 
 
 class _RecordingDailyFetcher:
@@ -71,6 +74,28 @@ class TestBaostockAShareCodeConversion(unittest.TestCase):
         self.assertEqual(fetcher._convert_stock_code("SZ600519"), "sz.600519")
         self.assertEqual(fetcher._convert_stock_code("SZ.600519"), "sz.600519")
         self.assertEqual(fetcher._convert_stock_code("ss.600519"), "sh.600519")
+
+
+    def test_analysis_and_screening_hold_same_sdk_session_lock(self) -> None:
+        def sdk_call():
+            self.assertTrue(BAOSTOCK_SESSION_LOCK.locked())
+            return SimpleNamespace(error_code="0")
+
+        def query(*args, **kwargs):
+            result = sdk_call()
+            rows = iter([True, False])
+            result.next = lambda: next(rows)
+            result.get_row_data = lambda: ["2026-05-22", "1", "1", "1", "1", "1", "1"]
+            return result
+
+        sdk = SimpleNamespace(login=sdk_call, logout=sdk_call, query_history_k_data_plus=query)
+        fetcher = BaostockFetcher()
+        with patch.dict("sys.modules", {"baostock": sdk}):
+            with fetcher._baostock_session():
+                self.assertTrue(BAOSTOCK_SESSION_LOCK.locked())
+            with patch.object(daily, "_BAOSTOCK_OUTAGE_ERROR", None):
+                self.assertFalse(daily._fetch_daily_baostock("600519", lookback_days=30).empty)
+        self.assertFalse(BAOSTOCK_SESSION_LOCK.locked())
 
 
 class TestPytdxAShareCodeConversion(unittest.TestCase):

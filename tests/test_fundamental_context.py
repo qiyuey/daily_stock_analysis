@@ -253,7 +253,8 @@ class TestFundamentalContext(unittest.TestCase):
             circ_mv=4.0e10,
             source=SimpleNamespace(value="tencent"),
         )
-        # Mock get_fundamental_bundle so growth/earnings/institution are not_supported (no network).
+        # ETF requests must never call company financial/shareholder endpoints,
+        # even if those endpoints happen to return plausible company data.
         bundle = {
             "status": "not_supported",
             "growth": {},
@@ -267,8 +268,9 @@ class TestFundamentalContext(unittest.TestCase):
                 patch(
                     "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_fundamental_bundle",
                     return_value=bundle,
-                ):
+                ) as fetch_bundle:
             ctx = manager.get_fundamental_context("159915")
+        fetch_bundle.assert_not_called()
         self.assertEqual(ctx["market"], "cn")
         self.assertIn(ctx["status"], ("partial", "not_supported"))
         self.assertEqual(ctx["coverage"].get("valuation"), "ok")

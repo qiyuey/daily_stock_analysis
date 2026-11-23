@@ -154,6 +154,14 @@ def _builder_artifacts(*, fundamental_context: dict) -> PipelineAnalysisArtifact
     )
 
 
+def test_failed_fundamental_subblocks_are_disclosed_without_penalizing_unsupported_fields() -> None:
+    for coverage_status in ("failed", "not_supported"):
+        pack = AnalysisContextBuilder.build(_builder_artifacts(fundamental_context={
+            "status": "partial", "coverage": {"valuation": "ok", "growth": coverage_status},
+        }))
+        assert ("fundamentals: partial" in pack.data_quality.limitations) == (coverage_status == "failed")
+
+
 def test_empty_or_invalid_pack_returns_empty_section() -> None:
     assert format_analysis_context_pack_prompt_section(None) == ""
     assert format_analysis_context_pack_prompt_section({}) == ""

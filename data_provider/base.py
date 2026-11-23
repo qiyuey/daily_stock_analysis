@@ -2155,7 +2155,16 @@ class DataFetcherManager:
             logger.error(f"[数据源终止] {stock_code} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
             raise DataFetchError(error_summary)
 
+        from .tushare_fetcher import TushareFetcher
+
         for attempt, fetcher in enumerate(fetchers, start=1):
+            if isinstance(fetcher, TushareFetcher):
+                denied_endpoint = fetcher.denied_daily_endpoint(stock_code)
+                if denied_endpoint:
+                    reason = f"[{fetcher.name}] {denied_endpoint} 权限熔断"
+                    errors.append(reason)
+                    logger.debug("[数据源跳过] %s: %s", stock_code, reason)
+                    continue
             if not self._is_daily_source_available(fetcher, market):
                 errors.append(self._daily_source_unavailable_error(fetcher))
                 continue
@@ -3024,6 +3033,10 @@ class DataFetcherManager:
         # 如果筹码分布功能被禁用，直接返回 None
         if not config.enable_chip_distribution:
             logger.debug(f"[筹码分布] 功能已禁用，跳过 {stock_code}")
+            return None
+
+        if _is_etf_code(stock_code):
+            logger.info("[筹码分布] %s ETF 不支持筹码分布，跳过数据源调用", stock_code)
             return None
 
         circuit_breaker = get_chip_circuit_breaker()
@@ -4103,7 +4116,7 @@ class DataFetcherManager:
             valuation_payload,
             "partial" if quote_payload is not None else "not_supported",
         )
-        if valuation_status == "partial" and valuation_err and not self._has_meaningful_payload(valuation_payload):
+        if valuation_err and not self._has_meaningful_payload(valuation_payload):
             valuation_status = "failed"
         result_ctx["valuation"] = self._build_fundamental_block(
             valuation_status,
@@ -4467,7 +4480,7 @@ class DataFetcherManager:
             valuation_payload,
             "partial" if quote_payload is not None else "not_supported",
         )
-        if valuation_status == "partial" and valuation_err and not self._has_meaningful_payload(valuation_payload):
+        if valuation_err and not self._has_meaningful_payload(valuation_payload):
             valuation_status = "failed"
         result_ctx["valuation"] = self._build_fundamental_block(
             valuation_status,
@@ -4482,20 +4495,45 @@ class DataFetcherManager:
         )
 
         # growth / earnings / institution (one AkShare call)
-        if remaining_seconds <= 0:
+        if is_etf:
+            # Company financial statements and shareholder endpoints do not
+            # describe a fund. Do not turn unsupported ETF fields into retries
+            # or accidentally present company financials as ETF fundamentals.
+            bundle_status = "not_supported"
+            bundle_payload = {}
+            bundle_errors = []
+            bundle_ms = 0
+        elif remaining_seconds <= 0:
             bundle_status = "failed"
             bundle_payload: Dict[str, Any] = {}
             bundle_errors = ["fundamental stage timeout"]
             bundle_ms = 0
         else:
             bundle_timeout = min(fetch_timeout, remaining_seconds)
+            bundle_progress: Dict[str, Any] = {}
+            bundle_progress_lock = RLock()
+
+            def save_bundle_progress(snapshot: Dict[str, Any]) -> None:
+                with bundle_progress_lock:
+                    bundle_progress.clear()
+                    bundle_progress.update(snapshot)
+
+            bundle_deadline = time.monotonic() + bundle_timeout
             bundle_payload, bundle_err_msg, bundle_ms = self._run_with_retry(
-                lambda: self._fundamental_adapter.get_fundamental_bundle(stock_code),
+                lambda: self._fundamental_adapter.get_fundamental_bundle(
+                    stock_code, deadline=bundle_deadline, progress_callback=save_bundle_progress,
+                ),
                 bundle_timeout,
                 "fundamental_bundle",
                 quarantine_key=("akshare", "fundamental_bundle"),
             )
             _consume_budget(bundle_ms)
+            if bundle_payload is None and bundle_err_msg:
+                with bundle_progress_lock:
+                    completed_blocks = dict(bundle_progress)
+                if any(self._has_meaningful_payload(completed_blocks.get(key))
+                       for key in ("growth", "earnings", "institution")):
+                    bundle_payload = {**completed_blocks, "status": "partial"}
             if not isinstance(bundle_payload, dict):
                 bundle_status = "failed"
                 bundle_payload = {}
@@ -4577,6 +4615,14 @@ class DataFetcherManager:
         growth_status = self._infer_block_status(growth_payload, bundle_status)
         earnings_status = self._infer_block_status(earnings_payload, bundle_status)
         institution_status = self._infer_block_status(institution_payload, bundle_status)
+        incomplete_bundle = bool(bundle_errors) or any("budget_exhausted" in error for error in adapter_errors)
+        if incomplete_bundle:
+            if not self._has_meaningful_payload(growth_payload):
+                growth_status = "failed"
+            if not self._has_meaningful_payload(earnings_payload):
+                earnings_status = "failed"
+            if not self._has_meaningful_payload(institution_payload):
+                institution_status = "failed"
 
         result_ctx["growth"] = self._build_fundamental_block(
             growth_status,
@@ -4669,6 +4715,8 @@ class DataFetcherManager:
             )
         elif all(value == "not_supported" for value in block_statuses.values()):
             result_ctx["status"] = "not_supported"
+        elif all(value in {"failed", "not_supported"} for value in block_statuses.values()):
+            result_ctx["status"] = "failed"
         elif "failed" in block_statuses.values() or "partial" in block_statuses.values():
             result_ctx["status"] = "partial"
         else:

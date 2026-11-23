@@ -20,6 +20,7 @@ import logging
 import re
 import threading
 import time
+from threading import RLock
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict, Any
 from urllib.parse import urlsplit
@@ -374,6 +375,8 @@ class TushareFetcher(BaseFetcher):
         self.last_error: Optional[str] = None
         self._permission_cooldown_seconds: float = float(TUSHARE_PERMISSION_COOLDOWN_SECONDS)
 
+        self._trade_dates_lock = RLock()
+
         # 尝试初始化 API
         self._init_api()
 
@@ -608,6 +611,11 @@ class TushareFetcher(BaseFetcher):
         return datetime.now(ZoneInfo("Asia/Shanghai"))
 
     def _get_trade_dates(self, end_date: Optional[str] = None) -> List[str]:
+        # Concurrent quote/chip/board callers share one calendar refresh.
+        with self._trade_dates_lock:
+            return self._load_trade_dates(end_date)
+
+    def _load_trade_dates(self, end_date: Optional[str] = None) -> List[str]:
         """按自然日刷新交易日历缓存，避免服务跨日后继续复用旧日历。"""
         if self._api is None or self.is_api_denied("trade_cal"):
             return []
@@ -618,7 +626,9 @@ class TushareFetcher(BaseFetcher):
         if self.date_list is not None and self._date_list_end == requested_end_date:
             return self.date_list
 
-        start_date = (china_now - timedelta(days=20)).strftime("%Y%m%d")
+        requested_end = datetime.strptime(requested_end_date, "%Y%m%d").date()
+        start = requested_end - timedelta(days=20)
+        start_date = start.strftime("%Y%m%d")
         try:
             df_cal = self._call_api_with_rate_limit(
                 "trade_cal",
@@ -626,13 +636,19 @@ class TushareFetcher(BaseFetcher):
                 start_date=start_date,
                 end_date=requested_end_date,
             )
-        except TusharePermissionError:
-            return []
+            if df_cal is None or df_cal.empty or not {"cal_date", "is_open"}.issubset(df_cal.columns):
+                raise DataFetchError("trade_cal returned no valid calendar")
+        except Exception:
+            # Use the existing exchange session calendar, never weekday guesses
+            # or stale dates. If its coverage is unavailable, preserve failure.
+            from src.core.trading_calendar import get_trading_dates
 
-        if df_cal is None or df_cal.empty or "cal_date" not in df_cal.columns:
-            logger.warning("[Tushare] trade_cal 返回为空，无法更新交易日历缓存")
-            self.date_list = []
+            sessions = get_trading_dates("cn", start, requested_end)
+            if sessions is None or len(sessions) == 0:
+                raise
+            self.date_list = sorted(sessions.strftime("%Y%m%d").tolist(), reverse=True)
             self._date_list_end = requested_end_date
+            logger.info("[Tushare] trade_cal unavailable; using local exchange calendar for %s", requested_end_date)
             return self.date_list
 
         trade_dates = sorted(
@@ -773,6 +789,17 @@ class TushareFetcher(BaseFetcher):
             return f"{code}.HK"
         return self._convert_stock_code(stock_code)
 
+    @staticmethod
+    def _daily_api_name(stock_code: str) -> str:
+        if _is_hk_market(stock_code):
+            return "hk_daily"
+        return "fund_daily" if _is_etf_code(stock_code) else "daily"
+
+    def denied_daily_endpoint(self, stock_code: str) -> Optional[str]:
+        """Identify a cached permission denial for this instrument's daily endpoint."""
+        endpoint = self._daily_api_name(stock_code)
+        return endpoint if self.is_api_denied(endpoint) else None
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
@@ -801,16 +828,13 @@ class TushareFetcher(BaseFetcher):
         if _is_us_code(stock_code):
             raise DataFetchError(f"TushareFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
         
-        is_hk = _is_hk_market(stock_code)
-         # 判断是否为 ETF / 港股，以选择不同接口
-        is_etf = _is_etf_code(stock_code)
-        if is_hk:
-            ts_code = self._convert_hk_stock_code_for_tushare(stock_code)
-            api_name = "hk_daily"
-        else:
-            ts_code = self._convert_stock_code(stock_code)
-            api_name = "fund_daily" if is_etf else "daily"
-        
+        api_name = self._daily_api_name(stock_code)
+        ts_code = (
+            self._convert_hk_stock_code_for_tushare(stock_code)
+            if api_name == "hk_daily"
+            else self._convert_stock_code(stock_code)
+        )
+
         # Convert date format (Tushare requires YYYYMMDD)
         ts_start = start_date.replace('-', '')
         ts_end = end_date.replace('-', '')

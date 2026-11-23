@@ -11,12 +11,17 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
+from copy import deepcopy
+from contextvars import ContextVar
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_BUNDLE_DEADLINE: ContextVar[Optional[float]] = ContextVar("fundamental_bundle_deadline", default=None)
 
 _DIVIDEND_KEYWORD_MAP: Dict[str, List[str]] = {
     "per_share": [
@@ -351,6 +356,10 @@ class AkshareFundamentalAdapter:
             return None, None, [f"import_akshare:{type(exc).__name__}"]
 
         for func_name, kwargs in candidates:
+            deadline = _BUNDLE_DEADLINE.get()
+            if deadline is not None and time.monotonic() >= deadline:
+                errors.append(f"{func_name}:budget_exhausted")
+                break
             fn = getattr(ak, func_name, None)
             if fn is None:
                 continue
@@ -369,7 +378,20 @@ class AkshareFundamentalAdapter:
                 continue
         return None, None, errors
 
-    def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
+    def get_fundamental_bundle(
+        self, stock_code: str, *, deadline: Optional[float] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Publish completed blocks while retaining the caller's timeout boundary."""
+        token = _BUNDLE_DEADLINE.set(deadline)
+        try:
+            return self._get_fundamental_bundle(stock_code, progress_callback)
+        finally:
+            _BUNDLE_DEADLINE.reset(token)
+
+    def _get_fundamental_bundle(
+        self, stock_code: str, progress_callback: Optional[Callable[[Dict[str, Any]], None]],
+    ) -> Dict[str, Any]:
         """
         Return normalized fundamental blocks from AkShare with partial tolerance.
         """
@@ -389,6 +411,10 @@ class AkshareFundamentalAdapter:
         shareholder_symbol = _to_sina_tx_symbol(stock_code)
         stock_code = _normalize_code(stock_code)
         report_dates = _recent_report_dates()
+
+        def publish() -> None:
+            if progress_callback is not None:
+                progress_callback(deepcopy(result))
 
         # Financial indicators
         fin_df, fin_source, fin_errors = self._call_df_candidates([
@@ -435,6 +461,7 @@ class AkshareFundamentalAdapter:
                 if result["growth"] or result["earnings"].get("financial_report"):
                     result["source_chain"].append(f"growth:{fin_source}")
 
+        publish()
         # Earnings forecast
         forecast_df, forecast_source, forecast_errors = self._call_df_candidates([
             ("stock_yjyg_em", {"date": report_date})
@@ -449,6 +476,7 @@ class AkshareFundamentalAdapter:
                     result["earnings"]["forecast_summary"] = summary
                     result["source_chain"].append(f"earnings_forecast:{forecast_source}")
 
+        publish()
         # Earnings quick report
         quick_df, quick_source, quick_errors = self._call_df_candidates([
             ("stock_yjkb_em", {"date": report_date})
@@ -463,6 +491,7 @@ class AkshareFundamentalAdapter:
                     result["earnings"]["quick_report_summary"] = summary
                     result["source_chain"].append(f"earnings_quick:{quick_source}")
 
+        publish()
         # Dividend details (cash dividend, pre-tax)
         dividend_df, dividend_source, dividend_errors = self._call_df_candidates([
             ("stock_fhps_detail_em", {"symbol": stock_code}),
@@ -476,6 +505,7 @@ class AkshareFundamentalAdapter:
                 result["earnings"]["dividend"] = dividend_payload
                 result["source_chain"].append(f"dividend:{dividend_source}")
 
+        publish()
         # Institution / top shareholders
         inst_df, inst_source, inst_errors = self._call_df_candidates([
             ("stock_institute_hold", {
@@ -491,6 +521,7 @@ class AkshareFundamentalAdapter:
                 result["institution"]["institution_holding_change"] = inst_change
                 result["source_chain"].append(f"institution:{inst_source}")
 
+        publish()
         top10_df, top10_source, top10_errors = self._call_df_candidates([
             ("stock_gdfx_top_10_em", {"symbol": shareholder_symbol, "date": report_date})
             for report_date in report_dates

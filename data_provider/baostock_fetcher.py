@@ -18,6 +18,7 @@ import logging
 import re
 from contextlib import contextmanager
 from datetime import datetime
+from threading import Lock
 from typing import Optional, Generator
 
 import pandas as pd
@@ -40,6 +41,9 @@ from .base import (
 import os
 
 logger = logging.getLogger(__name__)
+
+# The SDK shares its connection across every caller in the process.
+BAOSTOCK_SESSION_LOCK = Lock()
 
 
 def _is_us_code(stock_code: str) -> bool:
@@ -105,30 +109,24 @@ class BaostockFetcher(BaseFetcher):
                 # 在这里执行数据查询
         """
         bs = self._get_baostock()
-        login_result = None
-        
-        try:
-            # 登录 Baostock
-            login_result = bs.login()
-            
-            if login_result.error_code != '0':
-                raise DataFetchError(f"Baostock 登录失败: {login_result.error_msg}")
-            
-            logger.debug("Baostock 登录成功")
-            
-            yield bs
-            
-        finally:
-            # 确保登出，防止连接泄露
+        with BAOSTOCK_SESSION_LOCK:
             try:
-                logout_result = bs.logout()
-                if logout_result.error_code == '0':
-                    logger.debug("Baostock 登出成功")
-                else:
-                    logger.warning(f"Baostock 登出异常: {logout_result.error_msg}")
-            except Exception as e:
-                logger.warning(f"Baostock 登出时发生错误: {e}")
-    
+                login_result = bs.login()
+                if login_result.error_code != '0':
+                    raise DataFetchError(f"Baostock 登录失败: {login_result.error_msg}")
+
+                logger.debug("Baostock 登录成功")
+                yield bs
+            finally:
+                try:
+                    logout_result = bs.logout()
+                    if logout_result.error_code == '0':
+                        logger.debug("Baostock 登出成功")
+                    else:
+                        logger.warning(f"Baostock 登出异常: {logout_result.error_msg}")
+                except Exception as e:
+                    logger.warning(f"Baostock 登出时发生错误: {e}")
+
     def _convert_stock_code(self, stock_code: str) -> str:
         """
         转换股票代码为 Baostock 格式

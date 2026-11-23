@@ -425,7 +425,8 @@ def _build_news_block(artifacts: PipelineAnalysisArtifacts) -> AnalysisContextBl
     if artifacts.news_result_count is not None:
         metadata["news_result_count"] = artifacts.news_result_count
 
-    if not content:
+    has_results = artifacts.news_result_count is not None and artifacts.news_result_count > 0
+    if not content and not has_results:
         return AnalysisContextBlock(
             status=ContextFieldStatus.MISSING,
             items={
@@ -440,11 +441,12 @@ def _build_news_block(artifacts: PipelineAnalysisArtifacts) -> AnalysisContextBl
     return AnalysisContextBlock(
         status=ContextFieldStatus.AVAILABLE,
         items={
-            "content": AnalysisContextItem(
+            "content" if content else "result_count": AnalysisContextItem(
                 status=ContextFieldStatus.AVAILABLE,
-                value=content,
+                value=content if content else artifacts.news_result_count,
             )
         },
+        source="agent_search_tools" if artifacts.metadata.get("news_search_performed") else None,
         metadata=metadata,
     )
 
@@ -559,7 +561,12 @@ def _quality_limitations(blocks: Dict[str, AnalysisContextBlock]) -> List[str]:
 
     for key in ("news", "fundamentals", "chip"):
         status = _quality_block_status(blocks, key)
-        if status in _AUX_LIMITATION_STATUSES:
+        coverage = blocks[key].metadata.get("coverage", {}) if key in blocks else {}
+        has_failed_fundamentals = (
+            key == "fundamentals" and status == ContextFieldStatus.PARTIAL
+            and isinstance(coverage, dict) and "failed" in coverage.values()
+        )
+        if status in _AUX_LIMITATION_STATUSES or has_failed_fundamentals:
             limitations.append(f"{key}: {status.value}")
 
     return limitations[:5]

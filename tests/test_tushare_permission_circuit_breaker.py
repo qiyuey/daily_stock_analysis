@@ -533,10 +533,14 @@ def test_manager_permission_denials_do_not_disable_other_endpoints_or_new_tokens
     def get(provider_manager, code):
         return provider_manager.get_daily_data(code, start_date="2026-03-19", end_date="2026-03-20")[1]
 
-    with patch("data_provider.tushare_fetcher.requests.post", side_effect=fake_post):
+    with (
+        patch("data_provider.tushare_fetcher.requests.post", side_effect=fake_post),
+        patch.object(fetcher, "get_daily_data", wraps=fetcher.get_daily_data) as fetch_daily,
+    ):
         for code in denied_codes:
             assert get(manager, code) == fallback.name
         assert calls == [("old-token", denied_api)]
+        assert fetch_daily.call_count == 1
         # Check rotation before any successful old-token request could clear health.
         with patch("data_provider.tushare_fetcher.get_config", return_value=SimpleNamespace(tushare_token="new-token")):
             renewed = TushareFetcher()
